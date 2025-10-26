@@ -26,6 +26,7 @@ use super::footer::footer_height;
 use super::footer::render_footer;
 use super::footer::reset_mode_after_activity;
 use super::footer::toggle_shortcut_mode;
+use super::paste_burst::BufferedPaste;
 use super::paste_burst::CharDecision;
 use super::paste_burst::PasteBurst;
 use crate::bottom_pane::paste_burst::FlushResult;
@@ -268,6 +269,45 @@ impl ChatComposer {
             self.sync_file_search_popup();
         }
         true
+    }
+
+    fn handle_buffered_paste(&mut self, buffered: BufferedPaste) {
+        let text = Self::resolve_buffered_paste(buffered);
+        self.handle_paste(text);
+    }
+
+    fn resolve_buffered_paste(buffered: BufferedPaste) -> String {
+        let normalized_buffer = Self::normalize_line_endings(&buffered.text);
+        #[cfg(windows)]
+        {
+            use crate::clipboard_paste::read_clipboard_text;
+
+            if buffered
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                if let Ok(clipboard_text) = read_clipboard_text() {
+                    let normalized_clipboard = Self::normalize_line_endings(&clipboard_text);
+                    if normalized_clipboard != normalized_buffer {
+                        return normalized_clipboard;
+                    }
+                }
+            }
+        }
+        normalized_buffer
+    }
+
+    fn normalize_line_endings(text: &str) -> String {
+        if text.contains('\r') {
+            let replaced = text.replace("\r\n", "\n");
+            if replaced.contains('\r') {
+                replaced.replace('\r', "\n")
+            } else {
+                replaced
+            }
+        } else {
+            text.to_string()
+        }
     }
 
     pub fn handle_paste_image_path(&mut self, pasted: String) -> bool {
@@ -573,8 +613,8 @@ impl ChatComposer {
 
     #[inline]
     fn handle_non_ascii_char(&mut self, input: KeyEvent) -> (InputResult, bool) {
-        if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-            self.handle_paste(pasted);
+        if let Some(buffered) = self.paste_burst.flush_before_modified_input() {
+            self.handle_buffered_paste(buffered);
         }
         self.textarea.input(input);
         let text_after = self.textarea.text();
@@ -1048,8 +1088,8 @@ impl ChatComposer {
 
     fn handle_paste_burst_flush(&mut self, now: Instant) -> bool {
         match self.paste_burst.flush_if_due(now) {
-            FlushResult::Paste(pasted) => {
-                self.handle_paste(pasted);
+            FlushResult::Paste(buffered) => {
+                self.handle_buffered_paste(buffered);
                 true
             }
             FlushResult::Typed(ch) => {
@@ -1106,9 +1146,9 @@ impl ChatComposer {
                     return self.handle_non_ascii_char(input);
                 }
 
-                match self.paste_burst.on_plain_char(ch, now) {
+                match self.paste_burst.on_plain_char(ch, modifiers, now) {
                     CharDecision::BufferAppend => {
-                        self.paste_burst.append_char_to_buffer(ch, now);
+                        self.paste_burst.append_char_to_buffer(ch, modifiers, now);
                         return (InputResult::None, true);
                     }
                     CharDecision::BeginBuffer { retro_chars } => {
@@ -1124,7 +1164,7 @@ impl ChatComposer {
                                 self.textarea.replace_range(grab.start_byte..safe_cur, "");
                             }
                             self.paste_burst.begin_with_retro_grabbed(grab.grabbed, now);
-                            self.paste_burst.append_char_to_buffer(ch, now);
+                            self.paste_burst.append_char_to_buffer(ch, modifiers, now);
                             return (InputResult::None, true);
                         }
                         // If decide_begin_buffer opted not to start buffering,
@@ -1132,7 +1172,7 @@ impl ChatComposer {
                     }
                     CharDecision::BeginBufferFromPending => {
                         // First char was held; now append the current one.
-                        self.paste_burst.append_char_to_buffer(ch, now);
+                        self.paste_burst.append_char_to_buffer(ch, modifiers, now);
                         return (InputResult::None, true);
                     }
                     CharDecision::RetainFirstChar => {
@@ -1141,8 +1181,8 @@ impl ChatComposer {
                     }
                 }
             }
-            if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
-                self.handle_paste(pasted);
+            if let Some(buffered) = self.paste_burst.flush_before_modified_input() {
+                self.handle_buffered_paste(buffered);
             }
         }
 
