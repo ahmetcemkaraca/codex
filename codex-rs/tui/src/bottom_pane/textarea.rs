@@ -219,12 +219,9 @@ impl TextArea {
             }
             KeyEvent {
                 code: KeyCode::Char(c),
-                // Insert plain characters (and Shift-modified). Do NOT insert when ALT is held,
-                // because many terminals map Option/Meta combos to ALT+<char> (e.g. ESC f/ESC b)
-                // for word navigation. Those are handled explicitly below.
-                modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+                modifiers,
                 ..
-            } => self.insert_str(&c.to_string()),
+            } if Self::should_insert_char(c, modifiers) => self.insert_str(&c.to_string()),
             KeyEvent {
                 code: KeyCode::Char('j' | 'm'),
                 modifiers: KeyModifiers::CONTROL,
@@ -414,6 +411,18 @@ impl TextArea {
                 tracing::debug!("Unhandled key event in TextArea: {:?}", _o);
             }
         }
+    }
+
+    fn should_insert_char(c: char, modifiers: KeyModifiers) -> bool {
+        let mut mods = modifiers;
+        mods.remove(KeyModifiers::SHIFT);
+        if mods.is_empty() {
+            return true;
+        }
+        if c.is_ascii() {
+            return false;
+        }
+        mods == KeyModifiers::ALT || mods == (KeyModifiers::ALT | KeyModifiers::CONTROL)
     }
 
     // ####### Input Functions #######
@@ -996,7 +1005,9 @@ impl TextArea {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // crossterm types are intentionally not imported here to avoid unused warnings
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyEvent;
+    use crossterm::event::KeyModifiers;
     use rand::prelude::*;
 
     fn rand_grapheme(rng: &mut rand::rngs::StdRng) -> String {
@@ -1044,6 +1055,29 @@ mod tests {
         let mut t = TextArea::new();
         t.insert_str(text);
         t
+    }
+
+    #[test]
+    fn non_ascii_chars_insert_with_altgr_modifiers() {
+        let mut t = TextArea::new();
+        t.input(KeyEvent::new(
+            KeyCode::Char('İ'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
+        assert_eq!(t.text(), "İ");
+
+        t.input(KeyEvent::new(
+            KeyCode::Char('ß'),
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(t.text(), "İß");
+    }
+
+    #[test]
+    fn ascii_chars_with_alt_modifier_are_not_inserted() {
+        let mut t = TextArea::new();
+        t.input(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT));
+        assert_eq!(t.text(), "");
     }
 
     #[test]
