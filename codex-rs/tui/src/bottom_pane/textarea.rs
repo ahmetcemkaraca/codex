@@ -205,8 +205,18 @@ impl TextArea {
         self.end_of_line(self.cursor_pos)
     }
 
-    pub fn input(&mut self, event: KeyEvent) {
+    pub fn input(&mut self, event: KeyEvent, allow_alt_char_insertion: bool) {
         match event {
+            KeyEvent {
+                code: KeyCode::Char(c),
+                modifiers,
+                ..
+            } if allow_alt_char_insertion
+                && modifiers.contains(KeyModifiers::ALT)
+                && !modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                self.insert_str(&c.to_string());
+            }
             // Some terminals (or configurations) send Control key chords as
             // C0 control characters without reporting the CONTROL modifier.
             // Handle common fallbacks for Ctrl-B/Ctrl-F here so they don't get
@@ -1300,10 +1310,16 @@ mod tests {
         let mut t = ta_with("abcd");
         t.set_cursor(1);
 
-        t.input(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL));
+        t.input(
+            KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
+            false,
+        );
         assert_eq!(t.cursor(), 2);
 
-        t.input(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        t.input(
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL),
+            false,
+        );
         assert_eq!(t.cursor(), 1);
     }
 
@@ -1314,11 +1330,17 @@ mod tests {
 
         // Simulate terminals that send C0 control chars without CONTROL modifier.
         // ^B (U+0002) should move left
-        t.input(KeyEvent::new(KeyCode::Char('\u{0002}'), KeyModifiers::NONE));
+        t.input(
+            KeyEvent::new(KeyCode::Char('\u{0002}'), KeyModifiers::NONE),
+            false,
+        );
         assert_eq!(t.cursor(), 1);
 
         // ^F (U+0006) should move right
-        t.input(KeyEvent::new(KeyCode::Char('\u{0006}'), KeyModifiers::NONE));
+        t.input(
+            KeyEvent::new(KeyCode::Char('\u{0006}'), KeyModifiers::NONE),
+            false,
+        );
         assert_eq!(t.cursor(), 2);
     }
 
@@ -1327,17 +1349,20 @@ mod tests {
         // Test the custom Alt+Ctrl+h binding
         let mut t = ta_with("hello world");
         t.set_cursor(t.text().len()); // cursor at the end
-        t.input(KeyEvent::new(
-            KeyCode::Char('h'),
-            KeyModifiers::CONTROL | KeyModifiers::ALT,
-        ));
+        t.input(
+            KeyEvent::new(
+                KeyCode::Char('h'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+            false,
+        );
         assert_eq!(t.text(), "hello ");
         assert_eq!(t.cursor(), 6);
 
         // Test the standard Alt+Backspace binding
         let mut t = ta_with("hello world");
         t.set_cursor(t.text().len()); // cursor at the end
-        t.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+        t.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT), false);
         assert_eq!(t.text(), "hello ");
         assert_eq!(t.cursor(), 6);
     }
@@ -1346,7 +1371,7 @@ mod tests {
     fn delete_backward_word_handles_narrow_no_break_space() {
         let mut t = ta_with("32\u{202F}AM");
         t.set_cursor(t.text().len());
-        t.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+        t.input(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT), false);
         pretty_assertions::assert_eq!(t.text(), "32\u{202F}");
         pretty_assertions::assert_eq!(t.cursor(), t.text().len());
     }
@@ -1355,13 +1380,13 @@ mod tests {
     fn delete_forward_word_with_without_alt_modifier() {
         let mut t = ta_with("hello world");
         t.set_cursor(0);
-        t.input(KeyEvent::new(KeyCode::Delete, KeyModifiers::ALT));
+        t.input(KeyEvent::new(KeyCode::Delete, KeyModifiers::ALT), false);
         assert_eq!(t.text(), " world");
         assert_eq!(t.cursor(), 0);
 
         let mut t = ta_with("hello");
         t.set_cursor(0);
-        t.input(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        t.input(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE), false);
         assert_eq!(t.text(), "ello");
         assert_eq!(t.cursor(), 0);
     }
@@ -1371,19 +1396,28 @@ mod tests {
         // Test Ctrl+H as backspace
         let mut t = ta_with("12345");
         t.set_cursor(3); // cursor after '3'
-        t.input(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL));
+        t.input(
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
+            false,
+        );
         assert_eq!(t.text(), "1245");
         assert_eq!(t.cursor(), 2);
 
         // Test Ctrl+H at beginning (should be no-op)
         t.set_cursor(0);
-        t.input(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL));
+        t.input(
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
+            false,
+        );
         assert_eq!(t.text(), "1245");
         assert_eq!(t.cursor(), 0);
 
         // Test Ctrl+H at end
         t.set_cursor(t.text().len());
-        t.input(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL));
+        t.input(
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
+            false,
+        );
         assert_eq!(t.text(), "124");
         assert_eq!(t.cursor(), 3);
     }

@@ -141,10 +141,10 @@ impl BottomPaneView for FeedbackNoteView {
                 code: KeyCode::Enter,
                 ..
             } => {
-                self.textarea.input(key_event);
+                self.textarea.input(key_event, false);
             }
             other => {
-                self.textarea.input(other);
+                self.textarea.input(other, false);
             }
         }
     }

@@ -572,11 +572,15 @@ impl ChatComposer {
     }
 
     #[inline]
-    fn handle_non_ascii_char(&mut self, input: KeyEvent) -> (InputResult, bool) {
+    fn handle_non_ascii_char(
+        &mut self,
+        input: KeyEvent,
+        allow_alt_char_insertion: bool,
+    ) -> (InputResult, bool) {
         if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
             self.handle_paste(pasted);
         }
-        self.textarea.input(input);
+        self.textarea.input(input, allow_alt_char_insertion);
         let text_after = self.textarea.text();
         self.pending_pastes
             .retain(|(placeholder, _)| text_after.contains(placeholder));
@@ -1090,20 +1094,25 @@ impl ChatComposer {
         }
 
         // Intercept plain Char inputs to optionally accumulate into a burst buffer.
+        let mut allow_alt_char_insertion = false;
         if let KeyEvent {
             code: KeyCode::Char(ch),
             modifiers,
+            kind,
             ..
         } = input
         {
-            let has_ctrl_or_alt =
-                modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT);
-            if !has_ctrl_or_alt {
+            let has_ctrl = modifiers.contains(KeyModifiers::CONTROL);
+            let has_alt = modifiers.contains(KeyModifiers::ALT);
+            allow_alt_char_insertion =
+                has_alt && !has_ctrl && (kind == KeyEventKind::Repeat || !ch.is_ascii());
+            let treat_as_plain_char = !has_ctrl && (!has_alt || allow_alt_char_insertion);
+            if treat_as_plain_char {
                 // Non-ASCII characters (e.g., from IMEs) can arrive in quick bursts and be
                 // misclassified by paste heuristics. Flush any active burst buffer and insert
                 // non-ASCII characters directly.
                 if !ch.is_ascii() {
-                    return self.handle_non_ascii_char(input);
+                    return self.handle_non_ascii_char(input, allow_alt_char_insertion);
                 }
 
                 match self.paste_burst.on_plain_char(ch, now) {
@@ -1158,7 +1167,7 @@ impl ChatComposer {
         }
 
         // Normal input handling
-        self.textarea.input(input);
+        self.textarea.input(input, allow_alt_char_insertion);
         let text_after = self.textarea.text();
 
         // Update paste-burst heuristic for plain Char (no Ctrl/Alt) events.
@@ -1167,9 +1176,11 @@ impl ChatComposer {
         } = input;
         match code {
             KeyCode::Char(_) => {
-                let has_ctrl_or_alt = modifiers.contains(KeyModifiers::CONTROL)
-                    || modifiers.contains(KeyModifiers::ALT);
-                if has_ctrl_or_alt {
+                let has_ctrl = modifiers.contains(KeyModifiers::CONTROL);
+                let has_alt = modifiers.contains(KeyModifiers::ALT);
+                let has_ctrl_or_alt = has_ctrl || has_alt;
+                let treat_alt_as_plain = allow_alt_char_insertion && has_alt && !has_ctrl;
+                if has_ctrl_or_alt && !treat_alt_as_plain {
                     self.paste_burst.clear_window_after_non_char();
                 }
             }
@@ -2125,6 +2136,35 @@ mod tests {
             InputResult::Submitted(text) => assert_eq!(text, "hello"),
             _ => panic!("expected Submitted"),
         }
+    }
+
+    #[test]
+    fn windows_alt_repeat_paste_sequence_preserves_unicode() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyEventKind;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        let pasted = "Hello from İstanbul";
+        for ch in pasted.chars() {
+            let mut event = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT);
+            event.kind = KeyEventKind::Repeat;
+            let (result, _needs_redraw) = composer.handle_key_event(event);
+            assert_eq!(result, InputResult::None);
+        }
+        std::thread::sleep(ChatComposer::recommended_paste_flush_delay());
+        composer.flush_paste_burst_if_due();
+        pretty_assertions::assert_eq!(composer.textarea.text(), pasted);
     }
 
     #[test]
