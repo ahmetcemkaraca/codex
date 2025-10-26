@@ -142,6 +142,20 @@ pub fn paste_image_to_temp_png() -> Result<(PathBuf, PastedImageInfo), PasteImag
     ))
 }
 
+/// Attempt to read text currently stored on the system clipboard.
+#[cfg(not(target_os = "android"))]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn read_clipboard_text() -> Result<String, String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    cb.get_text().map_err(|e| e.to_string())
+}
+
+/// Android/Termux does not support arboard; return a clear error.
+#[cfg(target_os = "android")]
+pub fn read_clipboard_text() -> Result<String, String> {
+    Err("clipboard text paste is unsupported on Android".into())
+}
+
 /// Normalize pasted text that may represent a filesystem path.
 ///
 /// Supports:

@@ -1,3 +1,4 @@
+use crossterm::event::KeyModifiers;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -7,7 +8,6 @@ const PASTE_BURST_MIN_CHARS: u16 = 3;
 const PASTE_BURST_CHAR_INTERVAL: Duration = Duration::from_millis(8);
 const PASTE_ENTER_SUPPRESS_WINDOW: Duration = Duration::from_millis(120);
 
-#[derive(Default)]
 pub(crate) struct PasteBurst {
     last_plain_char_time: Option<Instant>,
     consecutive_plain_char_burst: u16,
@@ -15,7 +15,29 @@ pub(crate) struct PasteBurst {
     buffer: String,
     active: bool,
     // Hold first fast char briefly to avoid rendering flicker
-    pending_first_char: Option<(char, Instant)>,
+    pending_first_char: Option<PendingFirstChar>,
+    buffer_modifiers: KeyModifiers,
+}
+
+impl Default for PasteBurst {
+    fn default() -> Self {
+        Self {
+            last_plain_char_time: None,
+            consecutive_plain_char_burst: 0,
+            burst_window_until: None,
+            buffer: String::new(),
+            active: false,
+            pending_first_char: None,
+            buffer_modifiers: KeyModifiers::empty(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PendingFirstChar {
+    ch: char,
+    modifiers: KeyModifiers,
+    at: Instant,
 }
 
 pub(crate) enum CharDecision {
@@ -35,8 +57,14 @@ pub(crate) struct RetroGrab {
     pub grabbed: String,
 }
 
+pub(crate) struct BufferedPaste {
+    pub text: String,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub modifiers: KeyModifiers,
+}
+
 pub(crate) enum FlushResult {
-    Paste(String),
+    Paste(BufferedPaste),
     Typed(char),
     None,
 }
@@ -53,7 +81,12 @@ impl PasteBurst {
     }
 
     /// Entry point: decide how to treat a plain char with current timing.
-    pub fn on_plain_char(&mut self, ch: char, now: Instant) -> CharDecision {
+    pub fn on_plain_char(
+        &mut self,
+        ch: char,
+        modifiers: KeyModifiers,
+        now: Instant,
+    ) -> CharDecision {
         match self.last_plain_char_time {
             Some(prev) if now.duration_since(prev) <= PASTE_BURST_CHAR_INTERVAL => {
                 self.consecutive_plain_char_burst =
@@ -65,30 +98,39 @@ impl PasteBurst {
 
         if self.active {
             self.burst_window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
+            self.buffer_modifiers |= modifiers;
             return CharDecision::BufferAppend;
         }
 
         // If we already held a first char and receive a second fast char,
         // start buffering without retro-grabbing (we never rendered the first).
-        if let Some((held, held_at)) = self.pending_first_char
-            && now.duration_since(held_at) <= PASTE_BURST_CHAR_INTERVAL
+        if let Some(PendingFirstChar { ch: held, modifiers: held_modifiers, at }) =
+            self.pending_first_char
+            && now.duration_since(at) <= PASTE_BURST_CHAR_INTERVAL
         {
             self.active = true;
             // take() to clear pending; we already captured the held char above
             let _ = self.pending_first_char.take();
             self.buffer.push(held);
+            self.buffer_modifiers = held_modifiers | modifiers;
             self.burst_window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
             return CharDecision::BeginBufferFromPending;
         }
 
         if self.consecutive_plain_char_burst >= PASTE_BURST_MIN_CHARS {
+            self.buffer_modifiers = KeyModifiers::empty();
+            self.pending_first_char = None;
             return CharDecision::BeginBuffer {
                 retro_chars: self.consecutive_plain_char_burst.saturating_sub(1),
             };
         }
 
         // Save the first fast char very briefly to see if a burst follows.
-        self.pending_first_char = Some((ch, now));
+        self.pending_first_char = Some(PendingFirstChar {
+            ch,
+            modifiers,
+            at: now,
+        });
         CharDecision::RetainFirstChar
     }
 
@@ -108,11 +150,12 @@ impl PasteBurst {
         if timed_out && self.is_active_internal() {
             self.active = false;
             let out = std::mem::take(&mut self.buffer);
-            FlushResult::Paste(out)
+            let modifiers = std::mem::replace(&mut self.buffer_modifiers, KeyModifiers::empty());
+            FlushResult::Paste(BufferedPaste { text: out, modifiers })
         } else if timed_out {
             // If we were saving a single fast char and no burst followed,
             // flush it as normal typed input.
-            if let Some((ch, _at)) = self.pending_first_char.take() {
+            if let Some(PendingFirstChar { ch, .. }) = self.pending_first_char.take() {
                 FlushResult::Typed(ch)
             } else {
                 FlushResult::None
@@ -155,12 +198,14 @@ impl PasteBurst {
         }
         self.active = true;
         self.burst_window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
+        self.buffer_modifiers = KeyModifiers::empty();
     }
 
     /// Append a char into the burst buffer.
-    pub fn append_char_to_buffer(&mut self, ch: char, now: Instant) {
+    pub fn append_char_to_buffer(&mut self, ch: char, modifiers: KeyModifiers, now: Instant) {
         self.buffer.push(ch);
         self.burst_window_until = Some(now + PASTE_ENTER_SUPPRESS_WINDOW);
+        self.buffer_modifiers |= modifiers;
     }
 
     /// Decide whether to begin buffering by retroactively capturing recent
@@ -197,16 +242,20 @@ impl PasteBurst {
     }
 
     /// Before applying modified/non-char input: flush buffered burst immediately.
-    pub fn flush_before_modified_input(&mut self) -> Option<String> {
+    pub fn flush_before_modified_input(&mut self) -> Option<BufferedPaste> {
         if !self.is_active() {
             return None;
         }
         self.active = false;
         let mut out = std::mem::take(&mut self.buffer);
-        if let Some((ch, _at)) = self.pending_first_char.take() {
+        let mut modifiers = std::mem::replace(&mut self.buffer_modifiers, KeyModifiers::empty());
+        if let Some(PendingFirstChar { ch, modifiers: held_modifiers, .. }) =
+            self.pending_first_char.take()
+        {
             out.push(ch);
+            modifiers |= held_modifiers;
         }
-        Some(out)
+        Some(BufferedPaste { text: out, modifiers })
     }
 
     /// Clear only the timing window and any pending first-char.
@@ -218,6 +267,7 @@ impl PasteBurst {
         self.last_plain_char_time = None;
         self.burst_window_until = None;
         self.active = false;
+        self.buffer_modifiers = KeyModifiers::empty();
         self.pending_first_char = None;
     }
 
@@ -238,6 +288,7 @@ impl PasteBurst {
         self.burst_window_until = None;
         self.active = false;
         self.buffer.clear();
+        self.buffer_modifiers = KeyModifiers::empty();
         self.pending_first_char = None;
     }
 }
